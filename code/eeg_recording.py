@@ -22,7 +22,7 @@ from data_utils import (
     match_reorder_topomaps,
 )
 from hmm import segment_hmm
-from microstates import segment_microstates
+from microstates import segment_microstates, segment_microstates_kmeans_online
 
 
 class SingleSubjectRecording:
@@ -177,6 +177,24 @@ class SingleSubjectRecording:
         latent_segmentation[midpoints[-1] :] = latent_segmentation[peaks[-1]]
         self.latent_segmentation = latent_segmentation
 
+    def run_partial_latent_kmeans(self, n_states, use_gfp=True, n_inits=50):
+        (
+            self.latent_maps,
+            self.latent_segmentation,
+            self.polarity,
+            self.gev_tot,
+            self.gev_gfp,
+        ) = segment_microstates_kmeans_online(
+            self.data,
+            method="mod_kmeans",
+            n_states=n_states,
+            use_gfp=use_gfp,
+            n_inits=n_inits,
+            return_polarity=True,
+            init_maps=self.latent_maps
+        )
+        self.n_states = n_states
+        
     def run_latent_kmeans(self, n_states, use_gfp=True, n_inits=50):
         """
         Run microstate segmentation. Gets canonical microstates using modified

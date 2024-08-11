@@ -94,6 +94,7 @@ def segment_microstates(
         best_maps = None
         best_segmentation = None
         best_polarity = None
+        
         for _ in range(n_inits):
             maps = _mod_kmeans(
                 data[:, peaks],
@@ -134,6 +135,125 @@ def segment_microstates(
 
     else:
         raise ValueError(f"Unknown method for microstates: {method}")
+
+    if return_polarity:
+        return (
+            best_maps,
+            best_segmentation,
+            best_polarity,
+            best_gev,
+            best_gfp_gev,
+        )
+    else:
+        return best_maps, best_segmentation, best_gev, best_gfp_gev
+
+
+
+
+def segment_microstates_kmeans_online(
+    data,
+    n_states=4,
+    use_gfp=True,
+    normalize=False,
+    return_polarity=False,
+    init_maps=None,
+    **kwargs,
+):
+    """
+    Segment a continuous signal into microstates using one of the three methods:
+    - modified K-Means: stochastic clustering method, instead of recomputing
+        cluster centers using average, it computes largest eigenvector
+    - AAHC: Atomize and Agglomerative Hierarchical Clustering; bottom-up
+        approach, initialised with each topomap as a cluster, and number of
+        clusters is reduced in each step by re-assigning the worst cluster
+        (computed by GEV) to remaining clusters
+    - TAAHC: Topographic AAHC; same principle, instead of GEV for atomisation,
+        the worst cluster is determined using Pearson correlation
+
+    :param data: data to find the microstates in, channels x samples
+    :type data: np.ndarray
+    :param method: method to use, `mod_kmeans`, `AAHC`, `TAAHC`
+    :type method: str
+    :param n_states: number of states to find
+    :type n_states: int
+    :param use_gfp: whether to use GFP peaks to find microstates or whole data
+    :type use_gfp: bool
+    :param normalize: whether to z-score the data
+    :type normalize: bool
+    :param return_polarity: whether to return the polarity of the activation
+    :type return_polarity: bool
+    :**kwargs:
+        - n_inits: number of random initialisations to use for algorithm of
+            modified K-Means
+        - max_iter: the maximum number of iterations to perform in the modified
+            K-Means
+        - thresh: threshold for convergence of the modified K-Means
+        - min_peak_dist: minimal peak distance in GFP peaks
+        - smoothing: smoothing window type for GFP curve
+        - smoothing_window: smoothing window length for GFP curve
+    :return: microstate maps, dummy segmentation (maximum activation), polarity
+        (if `return_polarity` == True), global explained variance for whole
+        timeseries, global explained variance for GFP peaks
+    :rtype: (np.ndarray, np.ndarray, np.ndarray, float, float)
+    """
+    if normalize:
+        data = zscore(data, axis=1)
+
+    if use_gfp:
+        (peaks, gfp_curve) = get_gfp_peaks(
+            data,
+            min_peak_dist=kwargs.pop("min_peak_dist", 2),
+            smoothing=kwargs.pop("smoothing", None),
+            smoothing_window=kwargs.pop("smoothing_window", 100),
+        )
+    else:
+        peaks = np.arange(data.shape[1])
+        gfp_curve = np.std(data, axis=0)
+
+    # cache this value for later
+    gfp_sum_sq = np.sum(gfp_curve ** 2)
+    peaks_sum_sq = np.sum(data[:, peaks].std(axis=0) ** 2)
+
+    n_inits = kwargs.pop("n_inits", 10)
+    max_iter = kwargs.pop("max_iter", 1000)
+    thresh = kwargs.pop("thresh", 1e-6)
+    logging.debug(
+        f"Using modified K-Means for finding {n_states} microstates, using "
+        f"{n_inits} random initialisations..."
+    )
+    # several runs of the k-means algorithm, keep track of the best
+    # segmentation
+    best_gev = 0
+    best_gfp_gev = 0
+    best_maps = None
+    best_segmentation = None
+    best_polarity = None
+    
+    for _ in range(n_inits):
+        maps = _mod_kmeans(
+            data[:, peaks],
+            n_states,
+            max_iter,
+            thresh,
+            online=True,
+            maps=init_maps
+        )
+        activation = maps.dot(data)
+        segmentation = np.argmax(np.abs(activation), axis=0)
+        map_corr = corr_vectors(data, maps[segmentation].T)
+        gfp_corr = corr_vectors(data[:, peaks], maps[segmentation[peaks]].T)
+
+        # compare across iterations using global explained variance (GEV) of
+        # the found microstates.
+        gev = sum((gfp_curve * map_corr) ** 2) / gfp_sum_sq
+        gev_gfp = (
+            sum((data[:, peaks].std(axis=0) * gfp_corr) ** 2) / peaks_sum_sq
+        )
+        logging.debug(f"GEV of found microstates: {gev}")
+        if gev > best_gev:
+            best_gev, best_maps, best_segmentation = gev, maps, segmentation
+            best_gfp_gev = gev_gfp
+            best_polarity = np.sign(np.choose(segmentation, activation))
 
     if return_polarity:
         return (
@@ -255,6 +375,8 @@ def _mod_kmeans(
     n_states=4,
     max_iter=1000,
     thresh=1e-6,
+    online=False,
+    maps=None
 ):
     """
     The modified K-means clustering algorithm.
@@ -268,9 +390,13 @@ def _mod_kmeans(
     data_sum_sq = np.sum(data ** 2)
 
     # Select random timepoints for our initial topographic maps
-    init_times = np.random.choice(n_samples, size=n_states, replace=False)
-    maps = data[:, init_times].T
-    maps /= np.linalg.norm(maps, axis=1, keepdims=True)  # Normalize the maps
+    if not online:
+        init_times = np.random.choice(n_samples, size=n_states, replace=False)
+        maps = data[:, init_times].T
+        maps /= np.linalg.norm(maps, axis=1, keepdims=True)  # Normalize the maps
+    else:
+        if maps is None:
+            raise ValueError()
 
     prev_residual = np.inf
     for iteration in range(max_iter):
