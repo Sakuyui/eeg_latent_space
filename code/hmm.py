@@ -87,7 +87,7 @@ def segment_hmm(
         _, decoding = model.decode(data.T, algorithm="viterbi")
 
     # get one-hot encoding - design matrix
-    oh_enc = OneHotEncoder(sparse=False, categories=[np.arange(n_states)])
+    oh_enc = OneHotEncoder(categories=[np.arange(n_states)])
     one_hot = oh_enc.fit_transform(decoding[:, np.newaxis])
 
     # get HMM maps via linear regression
